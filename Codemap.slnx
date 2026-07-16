@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Codemap.Application/Codemap.Application.csproj" />
+    <Project Path="src/Codemap.Domain/Codemap.Domain.csproj" />
+    <Project Path="src/Codemap.Infrastructure/Codemap.Infrastructure.csproj" />
+    <Project Path="src/Codemap.Web/Codemap.Web.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Codemap.Tests/Codemap.Tests.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,121 @@
+@inject IJSRuntime JS
+
+<aside class="inspector">
+    @if (Detail is null)
+    {
+        <div class="placeholder">
+            Select a node to inspect its members<br />and relationships.
+            <br /><br />
+            <kbd>Ctrl</kbd>+<kbd>K</kbd> quick-jump &nbsp; <kbd>?</kbd> shortcuts
+        </div>
+    }
+    else
+    {
+        var node = Detail.Node;
+        <div>
+            <div class="insp-title">@node.DisplayName</div>
+            <div class="insp-chips" style="margin-top:6px">
+                <span class="chip kind-@node.Kind.ToString().ToLowerInvariant()">@node.Kind</span>
+                <span class="chip">@node.Language</span>
+            </div>
+            <div class="insp-ns" style="margin-top:6px">@(string.IsNullOrEmpty(node.Namespace) ? "(global)" : node.Namespace)</div>
+        </div>
+
+        <div class="insp-section">
+            <h4>Source file</h4>
+            <div class="source-row">
+                <span class="source-path" title="@SourceDisplay">@SourceDisplay</span>
+                <button class="copy-btn" title="Copy path" @onclick="CopyPathAsync">@(_copied ? "✓" : "⧉")</button>
+            </div>
+        </div>
+
+        <div class="insp-section">
+            <h4>Members (@node.Members.Count)</h4>
+            @if (node.Members.Count == 0)
+            {
+                <div class="insp-ns">No public members.</div>
+            }
+            @foreach (var member in node.Members)
+            {
+                <div class="member-row">
+                    <span class="sig">@if (member.IsStatic)
+                        {<span class="static-marker">static </span>}@member.Signature</span>
+                    <span class="type">@member.ReturnOrType</span>
+                </div>
+            }
+        </div>
+
+        <div class="insp-section">
+            <h4>Depends on (@Detail.DependsOn.Count)</h4>
+            @foreach (var relation in Detail.DependsOn)
+            {
+                <div class="relation-row" @onclick="() => RelationClicked.InvokeAsync(relation.Edge.ToId)">
+                    <span class="edge-tag @relation.Edge.Kind.ToString().ToLowerInvariant()">@relation.Edge.Kind</span>
+                    <span class="rel-name">@(relation.Other?.DisplayName ?? relation.Edge.ToId)</span>
+                    @if (relation.Edge.Detail is { } detail)
+                    {
+                        <span class="rel-detail">@detail</span>
+                    }
+                </div>
+            }
+        </div>
+
+        <div class="insp-section">
+            <h4>Depended on by (@Detail.DependedOnBy.Count)</h4>
+            @foreach (var relation in Detail.DependedOnBy)
+            {
+                <div class="relation-row" @onclick="() => RelationClicked.InvokeAsync(relation.Edge.FromId)">
+                    <span class="edge-tag @relation.Edge.Kind.ToString().ToLowerInvariant()">@relation.Edge.Kind</span>
+                    <span class="rel-name">@(relation.Other?.DisplayName ?? relation.Edge.FromId)</span>
+                    @if (relation.Edge.Detail is { } detail)
+                    {
+                        <span class="rel-detail">@detail</span>
+                    }
+                </div>
+            }
+        </div>
+
+        <div class="insp-section">
+            <h4>Annotation <span style="text-transform:none;font-weight:400">(UI-only, Delete to remove)</span></h4>
+            <input class="note-input" placeholder="Add a note for this node…"
+                   value="@CurrentAnnotation" @onchange="OnAnnotationChanged" />
+        </div>
+    }
+</aside>
+
+@code {
+    [Parameter] public NodeDetail? Detail { get; set; }
+    [Parameter] public IReadOnlyDictionary<string, string>? Annotations { get; set; }
+    [Parameter] public EventCallback<(string NodeId, string? Note)> AnnotationChanged { get; set; }
+    [Parameter] public EventCallback<string> RelationClicked { get; set; }
+
+    private bool _copied;
+
+    private string CurrentAnnotation =>
+        Detail is not null && Annotations is not null && Annotations.TryGetValue(Detail.Node.Id, out var note) ? note : string.Empty;
+
+    /// Path is relative to the scanned repository root; line number appended when known.
+    private string SourceDisplay =>
+        Detail is null
+            ? string.Empty
+            : Detail.Node.LineNumber > 0 ? $"{Detail.Node.SourceFile}:{Detail.Node.LineNumber}" : Detail.Node.SourceFile;
+
+    private async Task CopyPathAsync()
+    {
+        if (Detail is null) return;
+        await JS.InvokeVoidAsync("codemap.copyText", Detail.Node.SourceFile);
+        _copied = true;
+        StateHasChanged();
+        await Task.Delay(1500);
+        _copied = false;
+        StateHasChanged();
+    }
+
+    private Task OnAnnotationChanged(ChangeEventArgs e)
+    {
+        if (Detail is null) return Task.CompletedTask;
+        var text = e.Value?.ToString();
+        return AnnotationChanged.InvokeAsync((Detail.Node.Id, string.IsNullOrWhiteSpace(text) ? null : text));
+    }
+
+}

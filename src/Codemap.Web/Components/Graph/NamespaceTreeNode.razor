@@ -1,0 +1,52 @@
+<div class="ns-node">
+    <div class="ns-row @(ActiveScope == Node.FullPath ? "active" : null)" @onclick="Toggle">
+        <span class="chev">@(Node.Children.Count == 0 ? "" : IsExpanded ? "▾" : "▸")</span>
+        <SideIcon Name="@IconName" Class="@IconClass" />
+        <span>@Node.Name</span>
+        <span class="count">@Node.Count</span>
+    </div>
+    @if (IsExpanded && Node.Children.Count > 0)
+    {
+        <div class="ns-children">
+            @foreach (var child in Node.Children)
+            {
+                <NamespaceTreeNode Node="child" Expanded="Expanded" ActiveScope="@ActiveScope" Selected="Selected" />
+            }
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter] public required Sidebar.NsTreeNode Node { get; set; }
+    [Parameter] public required HashSet<string> Expanded { get; set; }
+    [Parameter] public string? ActiveScope { get; set; }
+    [Parameter] public EventCallback<string?> Selected { get; set; }
+
+    private bool IsExpanded => Expanded.Contains(Node.FullPath);
+
+    // Leaves show the language of their contents (C# / JS badge); mixed leaves keep the braces
+    // icon and groups with children stay folders.
+    private string IconName => Node switch
+    {
+        { Children.Count: > 0 } => "folder",
+        { CSharpCount: > 0, JsCount: 0 } => "csharp",
+        { JsCount: > 0, CSharpCount: 0 } => "js",
+        _ => "namespace",
+    };
+
+    private string IconClass => IconName switch
+    {
+        "csharp" => "ic-cs",
+        "js" => "ic-js",
+        _ => "ic-ns",
+    };
+
+    private async Task Toggle()
+    {
+        if (Node.Children.Count > 0)
+        {
+            if (!Expanded.Add(Node.FullPath)) Expanded.Remove(Node.FullPath);
+        }
+        await Selected.InvokeAsync(Node.FullPath);
+    }
+}

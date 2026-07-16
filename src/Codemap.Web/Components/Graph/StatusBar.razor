@@ -1,0 +1,19 @@
+<footer class="statusbar">
+    <span class="stat">types <b>@NodeCount</b></span>
+    <span class="stat">edges <b>@EdgeCount</b></span>
+    <span class="stat cycles @(CycleCount > 0 ? "has-cycles" : null)">cycles <b>@CycleCount</b></span>
+    <span class="stat warnings @(WarningCount > 0 ? "has-warnings" : null)"
+          @onclick="() => WarningsClicked.InvokeAsync()">
+        warnings <b>@WarningCount</b>
+    </span>
+    <span class="spring"></span>
+    <span class="hint"><kbd>?</kbd> shortcuts &nbsp; <kbd>Ctrl</kbd>+<kbd>K</kbd> jump &nbsp; <kbd>F</kbd> fit</span>
+</footer>
+
+@code {
+    [Parameter] public int NodeCount { get; set; }
+    [Parameter] public int EdgeCount { get; set; }
+    [Parameter] public int CycleCount { get; set; }
+    [Parameter] public int WarningCount { get; set; }
+    [Parameter] public EventCallback WarningsClicked { get; set; }
+}

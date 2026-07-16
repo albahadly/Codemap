@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Codemap.Application\Codemap.Application.csproj" />
+    <ProjectReference Include="..\Codemap.Infrastructure\Codemap.Infrastructure.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="10.0.10" />
+    <!-- Pinned to resolve NU1107: EF Core Design 10.0.10 pulls CodeAnalysis.CSharp 5.6.0 but CSharp.Workspaces 5.0.0 -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.6.0" />
+    <!-- MSBuildLocator (via Infrastructure) requires MSBuild assemblies to be excluded from runtime output. -->
+    <PackageReference Include="Microsoft.Build.Framework" Version="18.0.2" ExcludeAssets="runtime" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.10">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <BlazorDisableThrowNavigationException>true</BlazorDisableThrowNavigationException>
+    <!-- App version — shown next to the logo in the top bar (read via AssemblyInformationalVersion) -->
+    <Version>1.0.1</Version>
+  </PropertyGroup>
+
+</Project>

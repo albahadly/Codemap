@@ -1,0 +1,29 @@
+@if (Visible)
+{
+    <div class="overlay" @onclick="() => Closed.InvokeAsync()">
+        <div class="modal" @onclick:stopPropagation="true">
+            <header>Keyboard shortcuts <button class="close" @onclick="() => Closed.InvokeAsync()">✕</button></header>
+            <div class="modal-body">
+                <table class="shortcut-table">
+                    <tbody>
+                    <tr><td><kbd>Ctrl/⌘</kbd> + <kbd>K</kbd></td><td>Quick-jump search (works inside inputs)</td></tr>
+                    <tr><td><kbd>Ctrl/⌘</kbd> + <kbd>Enter</kbd></td><td>Analyze the current path</td></tr>
+                    <tr><td><kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd></td><td>Language filter: All / C# / JS</td></tr>
+                    <tr><td><kbd>F</kbd></td><td>Zoom to fit</td></tr>
+                    <tr><td><kbd>+</kbd> / <kbd>-</kbd></td><td>Zoom in / out (viewport-centered)</td></tr>
+                    <tr><td><kbd>Esc</kbd></td><td>Clear selection / close modals</td></tr>
+                    <tr><td><kbd>←→↑↓</kbd></td><td>Nudge selected node 1px (<kbd>Shift</kbd> = 10px)</td></tr>
+                    <tr><td><kbd>Delete</kbd> / <kbd>⌫</kbd></td><td>Remove the selected node's annotation (UI-only)</td></tr>
+                    <tr><td><kbd>Ctrl/⌘</kbd> + <kbd>F</kbd></td><td>Focus the namespace filter box</td></tr>
+                    <tr><td><kbd>?</kbd></td><td>This cheat-sheet</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public bool Visible { get; set; }
+    [Parameter] public EventCallback Closed { get; set; }
+}

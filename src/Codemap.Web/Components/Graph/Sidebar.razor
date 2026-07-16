@@ -1,0 +1,191 @@
+@inject IJSRuntime JS
+
+<aside class="sidebar">
+    <div>
+        <h3>Projects</h3>
+        @if (Projects.Count == 0)
+        {
+            <div class="ns-row" style="cursor:default">No scans yet</div>
+        }
+        @foreach (var project in Projects)
+        {
+            <div class="project-item @(project.Id == ActiveGraphId ? "active" : null)"
+                 @onclick="() => ProjectSelected.InvokeAsync(project.Id)"
+                 title="@project.Name — @(project.IsSnapshot ? "published snapshot" : "unpublished scan") — @project.ScannedAt.LocalDateTime.ToString("g")">
+                <SideIcon Name="@(project.IsSnapshot ? "snapshot" : "scan")"
+                          Class="@(project.IsSnapshot ? "ic-snapshot" : "ic-scan")" />
+                <span class="name">@project.Name</span>
+                <span class="counts">@project.NodeCount n / @project.EdgeCount e</span>
+            </div>
+        }
+    </div>
+
+    <div>
+        <h3>Namespaces</h3>
+        <input class="side-filter" @ref="_filterInput" placeholder="Filter… (Ctrl+F)"
+               value="@_filterText" @oninput="OnFilterInput" />
+        @if (Graph is not null)
+        {
+            <div class="ns-node" style="margin-top:6px">
+                <div class="ns-row @(NamespaceScope is null ? "active" : null)"
+                     @onclick="() => NamespaceSelected.InvokeAsync(null)">
+                    <span class="chev"></span>
+                    <SideIcon Name="all" Class="ic-ns" />
+                    <span>(all namespaces)</span>
+                    <span class="count">@Graph.Nodes.Count</span>
+                </div>
+                @foreach (var root in FilteredTree())
+                {
+                    <NamespaceTreeNode Node="root"
+                                       Expanded="_expanded"
+                                       ActiveScope="@NamespaceScope"
+                                       Selected="ns => NamespaceSelected.InvokeAsync(ns)" />
+                }
+            </div>
+        }
+    </div>
+
+    <div>
+        <h3>Edges</h3>
+        <div class="legend">
+            <div class="legend-row"><span class="legend-line inherits"></span> inherits</div>
+            <div class="legend-row"><span class="legend-line implements"></span> implements</div>
+            <div class="legend-row"><span class="legend-line calls"></span> calls</div>
+            <div class="legend-row"><span class="legend-line references"></span> references</div>
+            <div class="legend-row"><span class="legend-line invokes"></span> invokes (HTTP)</div>
+        </div>
+    </div>
+
+    <div>
+        <h3>Languages</h3>
+        <div class="legend">
+            <div class="legend-row"><SideIcon Name="csharp" Class="ic-cs" /><span class="legend-box cs"></span> C# — solid border</div>
+            <div class="legend-row"><SideIcon Name="js" Class="ic-js" /><span class="legend-box js"></span> JS/TS — dashed border</div>
+        </div>
+    </div>
+</aside>
+
+@code {
+    public sealed record ProjectListItem(Guid Id, string Name, DateTimeOffset ScannedAt, int NodeCount, int EdgeCount, bool IsSnapshot);
+
+    public sealed class NsTreeNode
+    {
+        public required string Name { get; init; }
+        public required string FullPath { get; init; }
+        public int Count { get; set; }
+        public int CSharpCount { get; set; }
+        public int JsCount { get; set; }
+        public List<NsTreeNode> Children { get; } = [];
+    }
+
+    [Parameter] public IReadOnlyList<ProjectListItem> Projects { get; set; } = [];
+    [Parameter] public Guid? ActiveGraphId { get; set; }
+    [Parameter] public EventCallback<Guid> ProjectSelected { get; set; }
+    [Parameter] public TopologyGraph? Graph { get; set; }
+    [Parameter] public string? NamespaceScope { get; set; }
+    [Parameter] public EventCallback<string?> NamespaceSelected { get; set; }
+
+    private ElementReference _filterInput;
+    private string _filterText = string.Empty;
+    private readonly HashSet<string> _expanded = new(StringComparer.Ordinal);
+    private Guid _treeGraphId;
+    private List<NsTreeNode> _tree = [];
+
+    public async Task FocusFilterAsync() => await JS.InvokeVoidAsync("codemap.focusElement", _filterInput);
+
+    protected override void OnParametersSet()
+    {
+        if (Graph is not null && Graph.Id != _treeGraphId)
+        {
+            _treeGraphId = Graph.Id;
+            _tree = BuildTree(Graph);
+            _expanded.Clear();
+            foreach (var root in _tree) _expanded.Add(root.FullPath); // expand first level by default
+        }
+    }
+
+    private void OnFilterInput(ChangeEventArgs e) => _filterText = e.Value?.ToString() ?? string.Empty;
+
+    private static List<NsTreeNode> BuildTree(TopologyGraph graph)
+    {
+        var roots = new List<NsTreeNode>();
+        foreach (var group in graph.Nodes.GroupBy(n => n.Namespace).OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            // JS namespaces are directory paths ('/'), C# are dotted — segment on both, but each tree
+            // node's FullPath must stay a literal prefix of the original namespace so scoping queries work.
+            var key = string.IsNullOrEmpty(group.Key) ? "(global)" : group.Key;
+            var level = roots;
+            NsTreeNode? current = null;
+            var start = 0;
+            while (start < key.Length)
+            {
+                var cut = key.IndexOfAny(['.', '/'], start);
+                var end = cut < 0 ? key.Length : cut;
+                var segment = key[start..end];
+                var fullPath = key[..end];
+                start = end + 1;
+                if (segment.Length == 0) continue;
+
+                current = level.FirstOrDefault(n => n.Name == segment);
+                if (current is null)
+                {
+                    current = new NsTreeNode { Name = segment, FullPath = fullPath };
+                    level.Add(current);
+                }
+                level = current.Children;
+            }
+            if (current is not null)
+            {
+                current.Count += group.Count();
+                current.CSharpCount += group.Count(n => n.Language == Language.CSharp);
+                current.JsCount += group.Count(n => n.Language is Language.JavaScript or Language.TypeScript);
+            }
+        }
+
+        AccumulateCounts(roots);
+        return roots;
+
+        static (int Total, int CSharp, int Js) AccumulateCounts(List<NsTreeNode> nodes)
+        {
+            var total = 0;
+            var cs = 0;
+            var js = 0;
+            foreach (var node in nodes)
+            {
+                var child = AccumulateCounts(node.Children);
+                node.Count += child.Total;
+                node.CSharpCount += child.CSharp;
+                node.JsCount += child.Js;
+                total += node.Count;
+                cs += node.CSharpCount;
+                js += node.JsCount;
+            }
+            return (total, cs, js);
+        }
+    }
+
+    private IEnumerable<NsTreeNode> FilteredTree()
+    {
+        if (string.IsNullOrWhiteSpace(_filterText)) return _tree;
+        return _tree.Select(FilterNode).Where(n => n is not null)!;
+    }
+
+    private NsTreeNode? FilterNode(NsTreeNode node)
+    {
+        var selfMatch = node.FullPath.Contains(_filterText, StringComparison.OrdinalIgnoreCase);
+        var children = node.Children.Select(FilterNode).Where(n => n is not null).Cast<NsTreeNode>().ToList();
+        if (!selfMatch && children.Count == 0) return null;
+
+        var copy = new NsTreeNode
+        {
+            Name = node.Name,
+            FullPath = node.FullPath,
+            Count = node.Count,
+            CSharpCount = node.CSharpCount,
+            JsCount = node.JsCount,
+        };
+        copy.Children.AddRange(children);
+        _expanded.Add(copy.FullPath); // auto-expand while filtering
+        return copy;
+    }
+}

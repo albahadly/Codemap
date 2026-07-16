@@ -1,0 +1,477 @@
+@page "/"
+@rendermode InteractiveServer
+@using System.Reflection
+@using Codemap.Domain.Graph
+@using Microsoft.AspNetCore.SignalR.Client
+@inject IDispatcher Dispatcher
+@inject NavigationManager Nav
+@inject KeyboardShortcutService Shortcuts
+@inject IJSRuntime JS
+@inject ILogger<Home> Logger
+@implements IAsyncDisposable
+
+<PageTitle>Codemap</PageTitle>
+
+<div class="app-shell">
+    <header class="topbar">
+        <div class="logo">Code<span>map</span><span class="app-version" title="Codemap version">v@(AppVersion)</span></div>
+        <input class="path-input" placeholder="Path to a repository, solution or project folder…"
+               @bind="_path" @bind:event="oninput" />
+        <select class="lang-hint" @bind="_languageHint" title="Language hint">
+            <option value="">Auto</option>
+            <option value="cs">C# only</option>
+            <option value="js">JS/TS only</option>
+        </select>
+        @if (_scanning)
+        {
+            <button class="btn" @onclick="CancelScan">Cancel</button>
+        }
+        else
+        {
+            <button class="btn primary" @onclick="StartScanAsync" title="Analyze (Ctrl+Enter)">Analyze</button>
+        }
+        <div class="scan-status">
+            <span class="dot @_statusDot"></span>
+            <span>@_statusText</span>
+            <span class="file">@_statusFile</span>
+        </div>
+        <span style="flex:1"></span>
+        <button class="btn subtle icon-btn" title="Switch to @(_theme == "light" ? "dark" : "light") mode" @onclick="ToggleThemeAsync">
+            <SideIcon Name="@(_theme == "light" ? "moon" : "sun")" />
+        </button>
+        <button class="btn subtle" title="Quick jump (Ctrl+K)" @onclick="() => _showQuickJump = true">⌕ Search</button>
+        <button class="btn subtle" title="Shortcuts (?)" @onclick="() => _showShortcuts = true">?</button>
+        <button class="btn" @onclick="OpenHistoryAsync">History</button>
+        <button class="btn" disabled="@(_graph is null)" @onclick="PublishAsync">Publish snapshot</button>
+    </header>
+
+    <div class="app-main">
+        <Sidebar @ref="_sidebar"
+                 Projects="_projects"
+                 ActiveGraphId="_activeGraphId"
+                 ProjectSelected="LoadGraphByIdAsync"
+                 Graph="_graph"
+                 NamespaceScope="@_namespaceScope"
+                 NamespaceSelected="OnNamespaceSelectedAsync" />
+
+        <GraphCanvas @ref="_canvas"
+                     Graph="_graph"
+                     SelectedNodeId="@_selectedNodeId"
+                     Filter="_filter"
+                     FilterChanged="filter => _filter = filter"
+                     NodeSelected="OnNodeSelectedAsync"
+                     DiffAddedIds="_diffAddedIds"
+                     DiffChangedIds="_diffChangedIds"
+                     Annotations="_annotations" />
+
+        <Inspector Detail="_nodeDetail"
+                   Annotations="_annotations"
+                   AnnotationChanged="OnAnnotationChanged"
+                   RelationClicked="OnRelationClickedAsync" />
+    </div>
+
+    <StatusBar NodeCount="_graph?.Nodes.Count ?? 0"
+               EdgeCount="_graph?.Edges.Count ?? 0"
+               CycleCount="_cycleCount"
+               WarningCount="_warnings.Count"
+               WarningsClicked="() => _showWarnings = !_showWarnings" />
+</div>
+
+@if (_showWarnings && _warnings.Count > 0)
+{
+    <div class="warnings-panel">
+        @foreach (var warning in _warnings)
+        {
+            <div>@warning</div>
+        }
+    </div>
+}
+
+<QuickJumpModal Visible="_showQuickJump"
+                Nodes="@(_graph?.Nodes ?? [])"
+                Closed="() => _showQuickJump = false"
+                NodePicked="OnQuickJumpPickedAsync" />
+
+<ShortcutsOverlay Visible="_showShortcuts" Closed="() => _showShortcuts = false" />
+
+<HistoryPanel Visible="_showHistory"
+              Closed="() => _showHistory = false"
+              Snapshots="_snapshots"
+              ScanRuns="_scanRuns"
+              Diff="_diff"
+              LoadSnapshot="LoadGraphByIdAsync"
+              DiffRequested="OnDiffRequestedAsync" />
+
+@code {
+    /// App version from the csproj <Version> property; the "+commithash" suffix
+    /// (added by SourceLink on CI builds) is trimmed for display.
+    private static readonly string AppVersion = ReadVersion();
+
+    private static string ReadVersion()
+    {
+        var info = typeof(Home).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        if (string.IsNullOrEmpty(info)) return typeof(Home).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
+        var metadataStart = info.IndexOf('+');
+        return metadataStart > 0 ? info[..metadataStart] : info;
+    }
+
+    private Sidebar? _sidebar;
+    private GraphCanvas? _canvas;
+
+    private string _path = string.Empty;
+    private string _languageHint = string.Empty;
+
+    private bool _scanning;
+    private CancellationTokenSource? _scanCts;
+    private string _statusDot = "";
+    private string _statusText = "Idle";
+    private string _statusFile = string.Empty;
+
+    private TopologyGraph? _graph;
+    private Guid? _activeGraphId;
+    private string? _namespaceScope;
+    private int _cycleCount;
+    private readonly List<string> _warnings = [];
+
+    private string? _selectedNodeId;
+    private NodeDetail? _nodeDetail;
+    private LanguageFilter _filter = LanguageFilter.All;
+    private readonly Dictionary<string, string> _annotations = new(StringComparer.Ordinal);
+
+    private List<Sidebar.ProjectListItem> _projects = [];
+    private IReadOnlyList<SnapshotInfo> _snapshots = [];
+    private IReadOnlyList<ScanRunInfo> _scanRuns = [];
+    private TopologyDiff? _diff;
+    private HashSet<string>? _diffAddedIds;
+    private HashSet<string>? _diffChangedIds;
+
+    private bool _showQuickJump;
+    private bool _showShortcuts;
+    private bool _showHistory;
+    private bool _showWarnings;
+    private string _theme = "dark";
+
+    private HubConnection? _hub;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await RefreshProjectListAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+
+        await Shortcuts.InitializeAsync();
+        Shortcuts.ShortcutPressed += OnShortcutAsync;
+
+        // Sync the toggle icon with whatever the head bootstrap script applied (saved or system theme).
+        _theme = await JS.InvokeAsync<string>("codemap.getTheme");
+        StateHasChanged();
+
+        // Live scan progress via the SignalR hub (spec §11: SignalR-backed ScanProgressChanged subscription).
+        _hub = new HubConnectionBuilder()
+            .WithUrl(Nav.ToAbsoluteUri("/hubs/scan-progress"))
+            .WithAutomaticReconnect()
+            .Build();
+        _hub.On<string, int, string>("scanProgress", (project, percent, file) => InvokeAsync(() =>
+        {
+            if (!_scanning) return;
+            _statusText = $"{project} — {percent}%";
+            _statusFile = file;
+            StateHasChanged();
+        }));
+        try
+        {
+            await _hub.StartAsync();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Scan-progress hub connection failed; progress will only update on completion.");
+        }
+    }
+
+    // ── scanning ─────────────────────────────────────────────────────────────────
+
+    private async Task StartScanAsync()
+    {
+        if (_scanning || string.IsNullOrWhiteSpace(_path)) return;
+
+        _scanning = true;
+        _statusDot = "running";
+        _statusText = "Starting…";
+        _statusFile = string.Empty;
+        _warnings.Clear();
+        _scanCts = new CancellationTokenSource();
+        StateHasChanged();
+
+        try
+        {
+            Language? hint = _languageHint switch
+            {
+                "cs" => Language.CSharp,
+                "js" => Language.JavaScript,
+                _ => null,
+            };
+            var result = await Dispatcher.Send(new ScanRepositoryCommand(_path.Trim(), hint), _scanCts.Token);
+            _warnings.AddRange(result.Warnings);
+            LoadGraph(result.Graph);
+            _statusDot = "done";
+            _statusText = $"{result.Graph.ProjectName}: {result.Graph.Nodes.Count} types";
+            _statusFile = string.Empty;
+            await RefreshProjectListAsync();
+        }
+        catch (OperationCanceledException)
+        {
+            _statusDot = "";
+            _statusText = "Scan canceled";
+            _statusFile = string.Empty;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Scan failed for {Path}", _path);
+            _statusDot = "failed";
+            _statusText = "Scan failed";
+            _statusFile = ex.Message;
+        }
+        finally
+        {
+            _scanning = false;
+            _scanCts?.Dispose();
+            _scanCts = null;
+            StateHasChanged();
+        }
+    }
+
+    private void CancelScan() => _scanCts?.Cancel();
+
+    private void LoadGraph(TopologyGraph graph)
+    {
+        _graph = graph;
+        _activeGraphId = graph.Id;
+        _namespaceScope = null;
+        _selectedNodeId = null;
+        _nodeDetail = null;
+        _diff = null;
+        _diffAddedIds = null;
+        _diffChangedIds = null;
+        _cycleCount = CycleDetector.CountCycles(graph.Edges);
+    }
+
+    private async Task LoadGraphByIdAsync(Guid graphId)
+    {
+        var graph = await Dispatcher.Send(new GetTopologyQuery(graphId));
+        if (graph is null)
+        {
+            _statusText = "Graph not found";
+            return;
+        }
+        LoadGraph(graph);
+        _showHistory = false;
+        _statusDot = "done";
+        _statusText = $"{graph.ProjectName}: {graph.Nodes.Count} types";
+    }
+
+    private async Task RefreshProjectListAsync()
+    {
+        try
+        {
+            var loaded = await Dispatcher.Send(new GetLoadedGraphsQuery());
+            var snapshots = await Dispatcher.Send(new GetSnapshotsQuery());
+            _snapshots = snapshots;
+
+            var seen = new HashSet<Guid>();
+            var items = new List<Sidebar.ProjectListItem>();
+            foreach (var g in loaded)
+            {
+                if (seen.Add(g.Id))
+                    items.Add(new Sidebar.ProjectListItem(g.Id, g.ProjectName, g.ScannedAt, g.NodeCount, g.EdgeCount, false));
+            }
+            foreach (var s in snapshots)
+            {
+                if (seen.Add(s.Id))
+                    items.Add(new Sidebar.ProjectListItem(s.Id, s.ProjectName, s.ScannedAt, s.NodeCount, s.EdgeCount, true));
+            }
+            _projects = items.OrderByDescending(i => i.ScannedAt).ToList();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Could not load project/snapshot lists (database offline?).");
+        }
+    }
+
+    // ── selection / inspector ────────────────────────────────────────────────────
+
+    private async Task OnNodeSelectedAsync(string? nodeId)
+    {
+        _selectedNodeId = nodeId;
+        _nodeDetail = null;
+        if (nodeId is not null && _activeGraphId is { } graphId)
+            _nodeDetail = await Dispatcher.Send(new GetNodeDetailQuery(graphId, nodeId));
+    }
+
+    private async Task OnRelationClickedAsync(string nodeId)
+    {
+        await OnNodeSelectedAsync(nodeId);
+        if (_canvas is not null) await _canvas.CenterOnNodeAsync(nodeId);
+    }
+
+    private async Task OnQuickJumpPickedAsync(CodeNode node)
+    {
+        await OnNodeSelectedAsync(node.Id);
+        if (_canvas is not null) await _canvas.CenterOnNodeAsync(node.Id);
+    }
+
+    private async Task OnNamespaceSelectedAsync(string? namespaceScope)
+    {
+        if (_activeGraphId is not { } graphId) return;
+        _namespaceScope = namespaceScope;
+        var graph = await Dispatcher.Send(new GetTopologyQuery(graphId, namespaceScope));
+        if (graph is not null)
+        {
+            _graph = graph;
+            _cycleCount = CycleDetector.CountCycles(graph.Edges);
+            if (_selectedNodeId is not null && graph.Nodes.All(n => n.Id != _selectedNodeId))
+            {
+                _selectedNodeId = null;
+                _nodeDetail = null;
+            }
+        }
+    }
+
+    private async Task ToggleThemeAsync()
+    {
+        _theme = _theme == "light" ? "dark" : "light";
+        await JS.InvokeVoidAsync("codemap.setTheme", _theme);
+    }
+
+    private void OnAnnotationChanged((string NodeId, string? Note) change)
+    {
+        if (change.Note is null) _annotations.Remove(change.NodeId);
+        else _annotations[change.NodeId] = change.Note;
+    }
+
+    // ── snapshots / diff ─────────────────────────────────────────────────────────
+
+    private async Task PublishAsync()
+    {
+        if (_activeGraphId is not { } graphId) return;
+        try
+        {
+            await Dispatcher.Send(new PublishSnapshotCommand(graphId));
+            _statusText = "Snapshot published";
+            await RefreshProjectListAsync();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Publish failed");
+            _statusDot = "failed";
+            _statusText = "Publish failed";
+            _statusFile = ex.Message;
+        }
+    }
+
+    private async Task OpenHistoryAsync()
+    {
+        await RefreshProjectListAsync();
+        try
+        {
+            _scanRuns = await Dispatcher.Send(new GetScanRunsQuery());
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Could not load scan history");
+        }
+        _showHistory = true;
+    }
+
+    private async Task OnDiffRequestedAsync((Guid From, Guid To) request)
+    {
+        try
+        {
+            _diff = await Dispatcher.Send(new GetTopologyDiffQuery(request.From, request.To));
+            _diffAddedIds = _diff.Added.Select(n => n.Id).ToHashSet(StringComparer.Ordinal);
+            _diffChangedIds = _diff.Changed.Select(c => c.After.Id).ToHashSet(StringComparer.Ordinal);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Diff failed");
+            _statusText = "Diff failed";
+            _statusFile = ex.Message;
+        }
+    }
+
+    // ── keyboard shortcuts (single subscription; mapping lives in ShortcutMapper) ─
+
+    private Task OnShortcutAsync(ShortcutAction action) => InvokeAsync(async () =>
+    {
+        switch (action.Kind)
+        {
+            case ShortcutActionKind.QuickJump:
+                _showQuickJump = true;
+                break;
+            case ShortcutActionKind.Analyze:
+                await StartScanAsync();
+                break;
+            case ShortcutActionKind.FilterAll:
+                _filter = LanguageFilter.All;
+                break;
+            case ShortcutActionKind.FilterCSharp:
+                _filter = LanguageFilter.CSharp;
+                break;
+            case ShortcutActionKind.FilterJs:
+                _filter = LanguageFilter.Js;
+                break;
+            case ShortcutActionKind.ZoomFit when _canvas is not null:
+                await _canvas.ZoomToFitAsync();
+                break;
+            case ShortcutActionKind.ZoomIn:
+                _canvas?.ZoomIn();
+                break;
+            case ShortcutActionKind.ZoomOut:
+                _canvas?.ZoomOut();
+                break;
+            case ShortcutActionKind.Escape:
+                if (_showQuickJump || _showShortcuts || _showHistory || _showWarnings)
+                {
+                    _showQuickJump = _showShortcuts = _showHistory = _showWarnings = false;
+                }
+                else
+                {
+                    _selectedNodeId = null;
+                    _nodeDetail = null;
+                }
+                break;
+            case ShortcutActionKind.NudgeLeft:
+                _canvas?.NudgeSelected(-action.Magnitude, 0);
+                break;
+            case ShortcutActionKind.NudgeRight:
+                _canvas?.NudgeSelected(action.Magnitude, 0);
+                break;
+            case ShortcutActionKind.NudgeUp:
+                _canvas?.NudgeSelected(0, -action.Magnitude);
+                break;
+            case ShortcutActionKind.NudgeDown:
+                _canvas?.NudgeSelected(0, action.Magnitude);
+                break;
+            case ShortcutActionKind.RemoveAnnotation when _selectedNodeId is not null:
+                _annotations.Remove(_selectedNodeId);
+                break;
+            case ShortcutActionKind.FocusSidebarFilter when _sidebar is not null:
+                await _sidebar.FocusFilterAsync();
+                break;
+            case ShortcutActionKind.ShowCheatSheet:
+                _showShortcuts = true;
+                break;
+        }
+        StateHasChanged();
+    });
+
+    public async ValueTask DisposeAsync()
+    {
+        Shortcuts.ShortcutPressed -= OnShortcutAsync;
+        _scanCts?.Cancel();
+        if (_hub is not null) await _hub.DisposeAsync();
+    }
+}

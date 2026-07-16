@@ -1,0 +1,134 @@
+@inject IJSRuntime JS
+
+@if (Visible)
+{
+    <div class="overlay" @onclick="() => Closed.InvokeAsync()">
+        <div class="modal" @onclick:stopPropagation="true">
+            <header>Quick jump <button class="close" @onclick="() => Closed.InvokeAsync()">✕</button></header>
+            <div class="modal-body">
+                <input class="qj-input" @ref="_input" placeholder="Type a class, interface or module name…"
+                       value="@_query" @oninput="OnInput" @onkeydown="OnKeyDown" />
+                @{ var results = Matches(); }
+                @for (var i = 0; i < results.Count; i++)
+                {
+                    var node = results[i];
+                    var index = i;
+                    <div class="qj-result @(index == _highlight ? "hilite" : null)"
+                         @onclick="() => Pick(node)">
+                        <span class="qj-kind kind-@node.Kind.ToString().ToLowerInvariant()">@KindGlyph(node.Kind)</span>
+                        <span>@node.DisplayName</span>
+                        <span class="qj-ns">@node.Namespace</span>
+                    </div>
+                }
+                @if (results.Count == 0 && _query.Length > 0)
+                {
+                    <div class="qj-result" style="cursor:default;color:var(--text-faint)">No matches.</div>
+                }
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public bool Visible { get; set; }
+    [Parameter] public IReadOnlyList<CodeNode> Nodes { get; set; } = [];
+    [Parameter] public EventCallback Closed { get; set; }
+    [Parameter] public EventCallback<CodeNode> NodePicked { get; set; }
+
+    private ElementReference _input;
+    private string _query = string.Empty;
+    private int _highlight;
+    private bool _wasVisible;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (Visible && !_wasVisible)
+        {
+            _query = string.Empty;
+            _highlight = 0;
+            await JS.InvokeVoidAsync("codemap.focusElement", _input);
+        }
+        _wasVisible = Visible;
+    }
+
+    private void OnInput(ChangeEventArgs e)
+    {
+        _query = e.Value?.ToString() ?? string.Empty;
+        _highlight = 0;
+    }
+
+    private async Task OnKeyDown(KeyboardEventArgs e)
+    {
+        var results = Matches();
+        switch (e.Key)
+        {
+            case "ArrowDown":
+                _highlight = Math.Min(_highlight + 1, Math.Max(0, results.Count - 1));
+                break;
+            case "ArrowUp":
+                _highlight = Math.Max(_highlight - 1, 0);
+                break;
+            case "Enter" when results.Count > 0:
+                await Pick(results[Math.Clamp(_highlight, 0, results.Count - 1)]);
+                break;
+        }
+    }
+
+    private async Task Pick(CodeNode node)
+    {
+        await NodePicked.InvokeAsync(node);
+        await Closed.InvokeAsync();
+    }
+
+    /// Client-side fuzzy subsequence match over the loaded node set — no server query (spec §14.9).
+    private List<CodeNode> Matches()
+    {
+        if (string.IsNullOrWhiteSpace(_query))
+            return Nodes.OrderBy(n => n.DisplayName, StringComparer.OrdinalIgnoreCase).Take(12).ToList();
+
+        return Nodes
+            .Select(n => (Node: n, Score: FuzzyScore(n.DisplayName, _query)))
+            .Where(t => t.Score > 0)
+            .OrderByDescending(t => t.Score)
+            .ThenBy(t => t.Node.DisplayName.Length)
+            .Take(12)
+            .Select(t => t.Node)
+            .ToList();
+    }
+
+    private static int FuzzyScore(string candidate, string query)
+    {
+        var score = 0;
+        var ci = 0;
+        var streak = 0;
+        foreach (var qc in query)
+        {
+            var found = false;
+            while (ci < candidate.Length)
+            {
+                if (char.ToLowerInvariant(candidate[ci]) == char.ToLowerInvariant(qc))
+                {
+                    streak++;
+                    score += 2 + streak * 2 + (ci == 0 || !char.IsLetterOrDigit(candidate[ci - 1]) || char.IsUpper(candidate[ci]) ? 5 : 0);
+                    ci++;
+                    found = true;
+                    break;
+                }
+                ci++;
+                streak = 0;
+            }
+            if (!found) return 0;
+        }
+        return score + Math.Max(0, 20 - candidate.Length / 3);
+    }
+
+    private static string KindGlyph(TypeKind kind) => kind switch
+    {
+        TypeKind.Class => "C",
+        TypeKind.Interface => "I",
+        TypeKind.Enum => "E",
+        TypeKind.Struct => "S",
+        TypeKind.Function => "ƒ",
+        _ => "M",
+    };
+}

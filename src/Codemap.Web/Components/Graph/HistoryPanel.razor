@@ -1,0 +1,103 @@
+@if (Visible)
+{
+    <div class="overlay" @onclick="() => Closed.InvokeAsync()">
+        <div class="modal" style="width:680px" @onclick:stopPropagation="true">
+            <header>Snapshots &amp; history <button class="close" @onclick="() => Closed.InvokeAsync()">✕</button></header>
+            <div class="modal-body">
+
+                <div class="history-section">
+                    <h4 style="margin:0 0 8px;color:var(--text-faint);font-size:11px;text-transform:uppercase">Published snapshots</h4>
+                    @if (Snapshots.Count == 0)
+                    {
+                        <div class="history-row">None yet — publish the current scan to keep it.</div>
+                    }
+                    @foreach (var snapshot in Snapshots)
+                    {
+                        <div class="history-row">
+                            <span class="mono">◆</span>
+                            <span>@snapshot.ProjectName</span>
+                            <span class="mono">@snapshot.ScannedAt.LocalDateTime.ToString("g")</span>
+                            <span class="mono">@snapshot.NodeCount n / @snapshot.EdgeCount e</span>
+                            <span class="spring"></span>
+                            <button class="btn subtle" @onclick="() => LoadSnapshot.InvokeAsync(snapshot.Id)">Load</button>
+                        </div>
+                    }
+                </div>
+
+                <div class="history-section">
+                    <h4 style="margin:0 0 8px;color:var(--text-faint);font-size:11px;text-transform:uppercase">Diff two snapshots</h4>
+                    <div class="diff-controls">
+                        <select @bind="_fromId">
+                            <option value="">from…</option>
+                            @foreach (var s in Snapshots)
+                            {
+                                <option value="@s.Id">@s.ProjectName @s.ScannedAt.LocalDateTime.ToString("g")</option>
+                            }
+                        </select>
+                        <span style="color:var(--text-faint)">→</span>
+                        <select @bind="_toId">
+                            <option value="">to…</option>
+                            @foreach (var s in Snapshots)
+                            {
+                                <option value="@s.Id">@s.ProjectName @s.ScannedAt.LocalDateTime.ToString("g")</option>
+                            }
+                        </select>
+                        <button class="btn" disabled="@(!CanDiff)" @onclick="RequestDiff">Compare</button>
+                    </div>
+
+                    @if (Diff is { } diff)
+                    {
+                        <div class="diff-stat">
+                            <span class="added">+@diff.Added.Count nodes</span>
+                            <span class="removed">−@diff.Removed.Count nodes</span>
+                            <span class="changed">~@diff.Changed.Count changed</span>
+                            <span class="added">+@diff.EdgesAdded.Count edges</span>
+                            <span class="removed">−@diff.EdgesRemoved.Count edges</span>
+                        </div>
+                        <div class="diff-list">
+                            @foreach (var node in diff.Added) { <div class="added">+ @node.Id</div> }
+                            @foreach (var node in diff.Removed) { <div class="removed">− @node.Id</div> }
+                            @foreach (var (before, _) in diff.Changed) { <div class="changed">~ @before.Id</div> }
+                            @foreach (var edge in diff.EdgesAdded) { <div class="added">+ @edge.FromId → @edge.ToId (@edge.Kind)</div> }
+                            @foreach (var edge in diff.EdgesRemoved) { <div class="removed">− @edge.FromId → @edge.ToId (@edge.Kind)</div> }
+                        </div>
+                    }
+                </div>
+
+                <div class="history-section">
+                    <h4 style="margin:0 0 8px;color:var(--text-faint);font-size:11px;text-transform:uppercase">Recent scans</h4>
+                    @foreach (var run in ScanRuns)
+                    {
+                        <div class="history-row">
+                            <span class="mono">@run.StartedAt.LocalDateTime.ToString("g")</span>
+                            <span class="name" title="@run.Path">@run.Path</span>
+                            <span class="spring"></span>
+                            <span class="mono">@run.NodeCount n / @run.EdgeCount e</span>
+                            <span class="mono" style="color:@(run.Status == "Completed" ? "var(--ok)" : run.Status == "Running" ? "var(--warn)" : "var(--err)")">@run.Status</span>
+                        </div>
+                    }
+                </div>
+
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public bool Visible { get; set; }
+    [Parameter] public EventCallback Closed { get; set; }
+    [Parameter] public IReadOnlyList<SnapshotInfo> Snapshots { get; set; } = [];
+    [Parameter] public IReadOnlyList<ScanRunInfo> ScanRuns { get; set; } = [];
+    [Parameter] public TopologyDiff? Diff { get; set; }
+    [Parameter] public EventCallback<Guid> LoadSnapshot { get; set; }
+    [Parameter] public EventCallback<(Guid From, Guid To)> DiffRequested { get; set; }
+
+    private string _fromId = string.Empty;
+    private string _toId = string.Empty;
+
+    private bool CanDiff =>
+        Guid.TryParse(_fromId, out var from) && Guid.TryParse(_toId, out var to) && from != to;
+
+    private Task RequestDiff() =>
+        CanDiff ? DiffRequested.InvokeAsync((Guid.Parse(_fromId), Guid.Parse(_toId))) : Task.CompletedTask;
+}
