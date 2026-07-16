@@ -48,11 +48,13 @@
             </marker>
         </defs>
         <g transform="@Transform">
+            @{ var linkedNeighbors = NeighborsOfSelected(); }
             @foreach (var edge in VisibleEdges())
             {
                 var kindClass = edge.Kind.ToString().ToLowerInvariant();
-                var dimmed = SelectedNodeId is not null && edge.FromId != SelectedNodeId && edge.ToId != SelectedNodeId;
-                <path class="edge-path @kindClass @(dimmed ? "dimmed" : null)"
+                var touchesSelection = SelectedNodeId is not null && (edge.FromId == SelectedNodeId || edge.ToId == SelectedNodeId);
+                var dimmed = SelectedNodeId is not null && !touchesSelection;
+                <path class="edge-path @kindClass @(dimmed ? "dimmed" : null) @(touchesSelection ? "active" : null)"
                       d="@EdgePath(edge)"
                       marker-end="url(#arr-@kindClass)" />
             }
@@ -61,6 +63,9 @@
                 var pos = PositionOf(node.Id);
                 var classes = $"node-card {LangClass(node.Language)}"
                               + (node.Id == SelectedNodeId ? " selected" : "")
+                              + (SelectedNodeId is not null && node.Id != SelectedNodeId
+                                  ? linkedNeighbors.Contains(node.Id) ? " linked" : " dimmed"
+                                  : "")
                               + (DiffAddedIds?.Contains(node.Id) == true ? " diff-added" : "")
                               + (DiffChangedIds?.Contains(node.Id) == true ? " diff-changed" : "");
                 <g class="@classes" transform="translate(@Inv(pos.X) @Inv(pos.Y))"
@@ -161,6 +166,30 @@
             if (visible.Contains(edge.FromId) && visible.Contains(edge.ToId))
                 yield return edge;
         }
+    }
+
+    private string? _neighborCacheKey;
+    private HashSet<string> _neighbors = [];
+
+    /// Direct neighbors (either edge direction, any edge kind) of the selected node — highlighted on
+    /// the canvas so the linked cluster stands out. Cached per graph+selection since this runs on
+    /// every render, including pointer-move renders while dragging.
+    private HashSet<string> NeighborsOfSelected()
+    {
+        // Edge count is part of the key because namespace-scoped views reuse the graph id.
+        var key = $"{Graph?.Id}|{Graph?.Edges.Count}|{SelectedNodeId}";
+        if (_neighborCacheKey == key) return _neighbors;
+        _neighborCacheKey = key;
+        _neighbors = new HashSet<string>(StringComparer.Ordinal);
+        if (Graph is not null && SelectedNodeId is { } selectedId)
+        {
+            foreach (var edge in Graph.Edges)
+            {
+                if (edge.FromId.Equals(selectedId, StringComparison.Ordinal)) _neighbors.Add(edge.ToId);
+                else if (edge.ToId.Equals(selectedId, StringComparison.Ordinal)) _neighbors.Add(edge.FromId);
+            }
+        }
+        return _neighbors;
     }
 
     private static string LangClass(Language language) =>

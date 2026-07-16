@@ -367,7 +367,7 @@ code, .mono { font-family: var(--font-mono); }
 .canvas-empty .big { font-size: 15px; color: var(--text-dim); }
 
 /* SVG node cards */
-.node-card { cursor: pointer; }
+.node-card { cursor: pointer; transition: opacity .18s ease; }
 .node-card .box {
     fill: var(--node-fill-cs);
     stroke: var(--border);
@@ -380,6 +380,10 @@ code, .mono { font-family: var(--font-mono); }
 }
 .node-card:hover .box { stroke: var(--text-dim); }
 .node-card.selected .box { stroke: var(--selection-stroke); stroke-width: 1.6; }
+/* selection neighborhood: linked nodes glow with the accent, everything else fades back */
+.node-card.linked .box { stroke: var(--accent-class); stroke-width: 1.8; }
+.node-card.dimmed { opacity: .22; }
+.node-card.dimmed:hover { opacity: .75; }
 .node-card.diff-added .box { stroke: var(--ok); stroke-width: 2; }
 .node-card.diff-changed .box { stroke: var(--warn); stroke-width: 2; }
 .node-card .name {
@@ -392,7 +396,8 @@ code, .mono { font-family: var(--font-mono); }
 .node-card .ns { fill: var(--text-faint); font-family: var(--font-mono); font-size: 9.5px; }
 .node-card .annotation { fill: var(--warn); font-family: var(--font-ui); font-size: 9.5px; font-style: italic; }
 
-.edge-path { fill: none; pointer-events: none; }
+.edge-path { fill: none; pointer-events: none; transition: opacity .18s ease; }
+.edge-path.active { stroke-width: 2; }
 .edge-path.inherits { stroke: var(--edge-inherits); stroke-width: 1.6; }
 .edge-path.implements { stroke: var(--edge-implements); stroke-width: 1.6; stroke-dasharray: 6 4; }
 .edge-path.calls { stroke: var(--edge-calls); stroke-width: 1; }
