@@ -19,9 +19,9 @@ normally stay invisible: the `fetch('/api/orders')` in your frontend that lands 
 ```mermaid
 flowchart LR
     repo["📁 Your repository<br/>C# + JS/TS"] --> scan["🔍 Static analysis<br/>Roslyn + TypeScript API"]
-    scan --> graph["🕸️ Typed graph<br/>nodes + edges"]
-    graph --> canvas["🖥️ Interactive canvas<br/>pan · zoom · filter · inspect"]
-    graph --> db[("💾 SQL Server<br/>snapshots")]
+    scan --> model["🕸️ Typed graph<br/>nodes + edges"]
+    model --> canvas["🖥️ Interactive canvas<br/>pan · zoom · filter · inspect"]
+    model --> db[("💾 SQL Server<br/>snapshots")]
     db --> diff["📊 Diff two snapshots<br/>added / removed / changed"]
     diff --> canvas
 ```
