@@ -1,5 +1,7 @@
 @using System.Globalization
 @inject IJSRuntime JS
+@inject ILogger<GraphCanvas> Logger
+@implements IAsyncDisposable
 
 <div class="canvas-wrap">
     <div class="filter-pills" title="Language filter (1 / 2 / 3)">
@@ -9,14 +11,14 @@
     </div>
     @if (Graph is not null && Filter != LanguageFilter.All)
     {
-        <div class="filter-count">showing @VisibleNodes().Count() of @Graph.Nodes.Count types</div>
+        <div class="filter-count">showing @VisibleNodes().Count of @Graph.Nodes.Count types</div>
     }
 
     <div class="canvas-toolbar">
-        <button aria-label="Zoom in" title="Zoom in (+)" @onclick="ZoomIn">+</button>
-        <button aria-label="Zoom out" title="Zoom out (-)" @onclick="ZoomOut">−</button>
+        <button aria-label="Zoom in" title="Zoom in (+)" @onclick="ZoomInAsync">+</button>
+        <button aria-label="Zoom out" title="Zoom out (-)" @onclick="ZoomOutAsync">−</button>
         <button aria-label="Zoom to fit" title="Zoom to fit (F)" @onclick="ZoomToFitAsync">⤢</button>
-        <button aria-label="Arrange nodes" title="Arrange nodes (auto layout)" @onclick="ArrangeAsync">⊞</button>
+        <button aria-label="Arrange nodes" title="Arrange nodes (auto layout)" @onclick="Arrange">⊞</button>
     </div>
 
     @if (Graph is null || Graph.Nodes.Count == 0)
@@ -36,12 +38,10 @@
         </div>
     }
 
-    <svg class="graph-svg @(_panning ? "panning" : null)" @ref="_svgElement"
-         @onpointerdown="OnCanvasPointerDown"
-         @onpointermove="OnPointerMove"
-         @onpointerup="OnPointerUp"
-         @onpointerleave="OnPointerUp"
-         @onwheel="OnWheel" @onwheel:preventDefault>
+    @* Pan/zoom/drag/selection-highlight are handled entirely client-side (codemap.canvas in
+       codemap.js) — no Blazor pointer events here, so mouse moves never round-trip to the server.
+       The .viewport transform and selection classes are owned by JS; keep them out of this markup. *@
+    <svg class="graph-svg" @ref="_svgElement">
         <defs>
             @* arrow fills come from app.css so they follow the active theme *@
             <marker id="arr-inherits" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -60,31 +60,23 @@
                 <path d="M0,0 L10,5 L0,10 z" />
             </marker>
         </defs>
-        <g transform="@Transform">
-            @{ var linkedNeighbors = NeighborsOfSelected(); }
+        <g class="viewport">
             @foreach (var edge in VisibleEdges())
             {
                 var kindClass = edge.Kind.ToString().ToLowerInvariant();
-                var touchesSelection = SelectedNodeId is not null && (edge.FromId == SelectedNodeId || edge.ToId == SelectedNodeId);
-                var dimmed = SelectedNodeId is not null && !touchesSelection;
-                <path class="edge-path @kindClass @(dimmed ? "dimmed" : null) @(touchesSelection ? "active" : null)"
+                <path class="edge-path @kindClass"
                       d="@EdgePath(edge)"
+                      data-from="@edge.FromId" data-to="@edge.ToId"
                       marker-end="url(#arr-@kindClass)" />
             }
             @foreach (var node in VisibleNodes())
             {
                 var pos = PositionOf(node.Id);
                 var classes = $"node-card {LangClass(node.Language)}"
-                              + (node.Id == SelectedNodeId ? " selected" : "")
-                              + (SelectedNodeId is not null && node.Id != SelectedNodeId
-                                  ? linkedNeighbors.Contains(node.Id) ? " linked" : " dimmed"
-                                  : "")
                               + (DiffAddedIds?.Contains(node.Id) == true ? " diff-added" : "")
                               + (DiffChangedIds?.Contains(node.Id) == true ? " diff-changed" : "");
                 <g class="@classes" transform="translate(@Inv(pos.X) @Inv(pos.Y))"
-                   @key="node.Id"
-                   @onpointerdown="e => OnNodePointerDown(node.Id, e)"
-                   @onpointerdown:stopPropagation="true">
+                   data-node-id="@node.Id" @key="node.Id">
                     <title>@node.DisplayName — @node.Kind (@LangBadge(node.Language))&#10;@(string.IsNullOrEmpty(node.Namespace) ? "(global)" : node.Namespace)&#10;@node.SourceFile</title>
                     <rect class="box" width="@Inv(NodeWidth)" height="@Inv(NodeHeight)" rx="10" />
                     <rect class="accent @KindCss(node.Kind)" width="3.5" height="@Inv(NodeHeight)" rx="1.5" />
@@ -104,6 +96,8 @@
 </div>
 
 @code {
+    // Mirrored in codemap.js (canvas nodeW/nodeH defaults) — passed to attach() so JS edge
+    // routing matches EdgePath below.
     private const double NodeWidth = 190;
     private const double NodeHeight = 64;
 
@@ -118,92 +112,138 @@
 
     private readonly Dictionary<string, (double X, double Y)> _positions = new(StringComparer.Ordinal);
     private ElementReference _svgElement;
+    private DotNetObjectReference<GraphCanvas>? _selfRef;
     private Guid _laidOutGraphId;
-    private double _panX, _panY;
-    private double _zoom = 1;
-    private (double W, double H) _viewport = (1200, 800);
-    private string? _draggingNodeId;
-    private bool _panning;
-    private double _lastX, _lastY;
-    private double _panTravel;
+    private bool _attached;
+    private bool _shouldRender = true;
+    private bool _syncQueued;
     private bool _fitQueued;
 
-    private string Transform =>
-        $"translate({Inv(_panX)} {Inv(_panY)}) scale({Inv(_zoom)})";
+    // Snapshot of the parameters the canvas markup actually depends on. Rendering a huge graph is
+    // expensive even when the diff is empty, so parent renders that change nothing (toasts, scan
+    // progress) or change only the selection (a client-side visual) skip re-rendering entirely.
+    private TopologyGraph? _renderedGraph;
+    private LanguageFilter _renderedFilter;
+    private IReadOnlySet<string>? _renderedDiffAdded;
+    private IReadOnlySet<string>? _renderedDiffChanged;
+    private int _renderedAnnotationCount;
+    private string? _appliedSelectedId;
+
+    private List<CodeNode>? _visibleNodes;
+    private List<CodeEdge>? _visibleEdges;
 
     private static string Inv(double value) => value.ToString("0.##", CultureInfo.InvariantCulture);
 
     protected override void OnParametersSet()
     {
-        if (Graph is not null && Graph.Id != _laidOutGraphId)
+        var structureChanged =
+            !ReferenceEquals(Graph, _renderedGraph)
+            || Filter != _renderedFilter
+            || !ReferenceEquals(DiffAddedIds, _renderedDiffAdded)
+            || !ReferenceEquals(DiffChangedIds, _renderedDiffChanged)
+            // Annotations is mutated in place by the parent, so count is the change signal; a
+            // value-only edit (same keys) doesn't affect canvas markup.
+            || (Annotations?.Count ?? 0) != _renderedAnnotationCount;
+
+        if (structureChanged)
         {
-            _laidOutGraphId = Graph.Id;
-            ComputeLayout();
-            _fitQueued = true;
+            _renderedGraph = Graph;
+            _renderedFilter = Filter;
+            _renderedDiffAdded = DiffAddedIds;
+            _renderedDiffChanged = DiffChangedIds;
+            _renderedAnnotationCount = Annotations?.Count ?? 0;
+            _visibleNodes = null;
+            _visibleEdges = null;
+            _shouldRender = true;
+            _syncQueued = true;
+
+            if (Graph is not null && Graph.Id != _laidOutGraphId)
+            {
+                _laidOutGraphId = Graph.Id;
+                ComputeLayout();
+                _fitQueued = true;
+            }
+        }
+
+        if (_appliedSelectedId != SelectedNodeId)
+        {
+            _appliedSelectedId = SelectedNodeId;
+            // Selection came from outside the canvas (quick-jump, Esc, relation click) — apply the
+            // highlight client-side without re-rendering. When a sync is queued it re-applies anyway.
+            if (_attached && !_syncQueued) _ = ApplySelectionAsync(SelectedNodeId);
         }
     }
+
+    protected override bool ShouldRender() => _shouldRender;
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        if (firstRender) await MeasureAsync();
-        if (_fitQueued)
+        if (firstRender)
         {
+            _selfRef = DotNetObjectReference.Create(this);
+            await CanvasJsAsync("codemap.canvas.attach", _svgElement, _selfRef, NodeWidth, NodeHeight);
+            _attached = true;
+        }
+        if (_syncQueued)
+        {
+            _syncQueued = false;
+            var fit = _fitQueued;
             _fitQueued = false;
-            await ZoomToFitAsync();
-            StateHasChanged();
+            await CanvasJsAsync("codemap.canvas.sync", fit, _appliedSelectedId);
         }
+        _shouldRender = false;
     }
 
-    private async Task MeasureAsync()
+    /// All canvas interop funnels through here: a failed call (circuit tearing down, or a stale
+    /// tab whose cached codemap.js predates the canvas module) must never fault the circuit.
+    private async Task CanvasJsAsync(string identifier, params object?[] args)
     {
-        try
+        try { await JS.InvokeVoidAsync(identifier, args); }
+        catch (JSDisconnectedException) { /* circuit gone */ }
+        catch (JSException ex)
         {
-            var rect = await JS.InvokeAsync<Rect>("codemap.measure", _svgElement);
-            if (rect is { Width: > 0, Height: > 0 }) _viewport = (rect.Width, rect.Height);
+            Logger.LogWarning(ex, "Canvas interop call {Identifier} failed (stale client script?).", identifier);
         }
-        catch (JSException) { /* keep the default viewport estimate */ }
     }
 
-    private sealed record Rect(double Width, double Height);
+    private Task ApplySelectionAsync(string? nodeId) => CanvasJsAsync("codemap.canvas.select", nodeId);
+
+    // ── JS callbacks (client canvas → server state) ───────────────────────────────
+
+    [JSInvokable]
+    public Task OnNodeSelectedJs(string? nodeId)
+    {
+        _appliedSelectedId = nodeId; // JS already applied the highlight
+        return NodeSelected.InvokeAsync(nodeId);
+    }
+
+    [JSInvokable]
+    public void OnNodeMovedJs(string nodeId, double x, double y) => _positions[nodeId] = (x, y);
 
     // ── visibility ────────────────────────────────────────────────────────────────
 
-    private IEnumerable<CodeNode> VisibleNodes() =>
-        Graph is null ? [] : Graph.Nodes.Where(n => Filter.Matches(n.Language));
+    private List<CodeNode> VisibleNodes() =>
+        _visibleNodes ??= Graph is null
+            ? []
+            : Graph.Nodes.Where(n => Filter.Matches(n.Language)).ToList();
 
-    private IEnumerable<CodeEdge> VisibleEdges()
+    private List<CodeEdge> VisibleEdges()
     {
-        if (Graph is null) yield break;
-        var visible = VisibleNodes().Select(n => n.Id).ToHashSet(StringComparer.Ordinal);
-        foreach (var edge in Graph.Edges)
+        if (_visibleEdges is null)
         {
-            if (visible.Contains(edge.FromId) && visible.Contains(edge.ToId))
-                yield return edge;
-        }
-    }
-
-    private string? _neighborCacheKey;
-    private HashSet<string> _neighbors = [];
-
-    /// Direct neighbors (either edge direction, any edge kind) of the selected node — highlighted on
-    /// the canvas so the linked cluster stands out. Cached per graph+selection since this runs on
-    /// every render, including pointer-move renders while dragging.
-    private HashSet<string> NeighborsOfSelected()
-    {
-        // Edge count is part of the key because namespace-scoped views reuse the graph id.
-        var key = $"{Graph?.Id}|{Graph?.Edges.Count}|{SelectedNodeId}";
-        if (_neighborCacheKey == key) return _neighbors;
-        _neighborCacheKey = key;
-        _neighbors = new HashSet<string>(StringComparer.Ordinal);
-        if (Graph is not null && SelectedNodeId is { } selectedId)
-        {
-            foreach (var edge in Graph.Edges)
+            if (Graph is null)
             {
-                if (edge.FromId.Equals(selectedId, StringComparison.Ordinal)) _neighbors.Add(edge.ToId);
-                else if (edge.ToId.Equals(selectedId, StringComparison.Ordinal)) _neighbors.Add(edge.FromId);
+                _visibleEdges = [];
+            }
+            else
+            {
+                var visible = VisibleNodes().Select(n => n.Id).ToHashSet(StringComparer.Ordinal);
+                _visibleEdges = Graph.Edges
+                    .Where(e => visible.Contains(e.FromId) && visible.Contains(e.ToId))
+                    .ToList();
             }
         }
-        return _neighbors;
+        return _visibleEdges;
     }
 
     private static string LangClass(Language language) =>
@@ -273,6 +313,8 @@
         return pos;
     }
 
+    // Mirrored in codemap.js (canvas edgePathD) so edges follow nodes live while dragging —
+    // keep the two in sync.
     private string EdgePath(CodeEdge edge)
     {
         var s = PositionOf(edge.FromId);
@@ -287,118 +329,42 @@
         return $"M {Inv(sx)} {Inv(sy)} C {Inv(sx + sign * bend)} {Inv(sy)}, {Inv(tx - sign * bend)} {Inv(ty)}, {Inv(tx)} {Inv(ty)}";
     }
 
-    // ── interaction ───────────────────────────────────────────────────────────────
+    // ── interaction (discrete actions only; continuous input lives in codemap.js) ──
 
     private Task SetFilter(LanguageFilter filter) => FilterChanged.InvokeAsync(filter);
 
-    private async Task OnNodePointerDown(string nodeId, PointerEventArgs e)
-    {
-        _draggingNodeId = nodeId;
-        _lastX = e.ClientX;
-        _lastY = e.ClientY;
-        try { await JS.InvokeVoidAsync("codemap.capturePointer", _svgElement, e.PointerId); }
-        catch (JSException) { }
-        await NodeSelected.InvokeAsync(nodeId);
-    }
-
-    private async Task OnCanvasPointerDown(PointerEventArgs e)
-    {
-        _panning = true;
-        _panTravel = 0;
-        _lastX = e.ClientX;
-        _lastY = e.ClientY;
-        try { await JS.InvokeVoidAsync("codemap.capturePointer", _svgElement, e.PointerId); }
-        catch (JSException) { }
-    }
-
-    private void OnPointerMove(PointerEventArgs e)
-    {
-        var dx = e.ClientX - _lastX;
-        var dy = e.ClientY - _lastY;
-
-        if (_draggingNodeId is { } id && _positions.TryGetValue(id, out var pos))
-        {
-            _positions[id] = (pos.X + dx / _zoom, pos.Y + dy / _zoom);
-        }
-        else if (_panning)
-        {
-            _panX += dx;
-            _panY += dy;
-            _panTravel += Math.Abs(dx) + Math.Abs(dy);
-        }
-        else
-        {
-            return;
-        }
-
-        _lastX = e.ClientX;
-        _lastY = e.ClientY;
-    }
-
-    private async Task OnPointerUp(PointerEventArgs e)
-    {
-        // A background press that never moved is a click → clear the selection.
-        if (_panning && _panTravel < 3 && _draggingNodeId is null && e.Type != "pointerleave")
-            await NodeSelected.InvokeAsync(null);
-        _draggingNodeId = null;
-        _panning = false;
-    }
-
-    private void OnWheel(WheelEventArgs e) =>
-        ApplyZoom(e.DeltaY < 0 ? 1.13 : 1 / 1.13);
-
-    public void ZoomIn() => ApplyZoom(1.25);
-    public void ZoomOut() => ApplyZoom(1 / 1.25);
-
-    /// Zooms around the viewport center (spec: +/- are centered on the current viewport).
-    private void ApplyZoom(double factor)
-    {
-        var newZoom = Math.Clamp(_zoom * factor, 0.08, 2.5);
-        var (cx, cy) = (_viewport.W / 2, _viewport.H / 2);
-        _panX = cx - (cx - _panX) * (newZoom / _zoom);
-        _panY = cy - (cy - _panY) * (newZoom / _zoom);
-        _zoom = newZoom;
-    }
+    public Task ZoomInAsync() => CanvasJsAsync("codemap.canvas.zoomIn");
+    public Task ZoomOutAsync() => CanvasJsAsync("codemap.canvas.zoomOut");
+    public Task ZoomToFitAsync() => CanvasJsAsync("codemap.canvas.zoomToFit");
+    public Task CenterOnNodeAsync(string nodeId) => CanvasJsAsync("codemap.canvas.centerOnNode", nodeId);
 
     /// Re-runs the namespace-cluster auto layout (undoes manual dragging) and refits the viewport.
-    private async Task ArrangeAsync()
+    private void Arrange()
     {
         ComputeLayout();
-        await ZoomToFitAsync();
+        _shouldRender = true;
+        _syncQueued = true;
+        _fitQueued = true;
     }
 
-    public async Task ZoomToFitAsync()
+    public async Task NudgeSelectedAsync(double dx, double dy)
     {
-        await MeasureAsync();
-        var visible = VisibleNodes().Select(n => PositionOf(n.Id)).ToList();
-        if (visible.Count == 0) return;
-
-        var minX = visible.Min(p => p.X);
-        var minY = visible.Min(p => p.Y);
-        var maxX = visible.Max(p => p.X) + NodeWidth;
-        var maxY = visible.Max(p => p.Y) + NodeHeight;
-        var width = Math.Max(1, maxX - minX);
-        var height = Math.Max(1, maxY - minY);
-
-        const double margin = 60;
-        _zoom = Math.Clamp(Math.Min((_viewport.W - margin) / width, (_viewport.H - margin) / height), 0.08, 1.4);
-        _panX = (_viewport.W - width * _zoom) / 2 - minX * _zoom;
-        _panY = (_viewport.H - height * _zoom) / 2 - minY * _zoom;
+        if (SelectedNodeId is not { } id || !_positions.TryGetValue(id, out var pos)) return;
+        var moved = (X: pos.X + dx, Y: pos.Y + dy);
+        _positions[id] = moved;
+        await CanvasJsAsync("codemap.canvas.moveNode", id, moved.X, moved.Y);
     }
 
-    public void NudgeSelected(double dx, double dy)
+    public async ValueTask DisposeAsync()
     {
-        if (SelectedNodeId is { } id && _positions.TryGetValue(id, out var pos))
-            _positions[id] = (pos.X + dx, pos.Y + dy);
-        StateHasChanged();
-    }
-
-    public async Task CenterOnNodeAsync(string nodeId)
-    {
-        await MeasureAsync();
-        var pos = PositionOf(nodeId);
-        _panX = _viewport.W / 2 - (pos.X + NodeWidth / 2) * _zoom;
-        _panY = _viewport.H / 2 - (pos.Y + NodeHeight / 2) * _zoom;
-        StateHasChanged();
+        // _attached is only set after the first interactive render, so this skips the prerender
+        // pass (where JS interop is unavailable and there is nothing to detach anyway).
+        if (_attached)
+        {
+            try { await JS.InvokeVoidAsync("codemap.canvas.detach"); }
+            catch (JSDisconnectedException) { /* circuit gone */ }
+            catch (InvalidOperationException) { /* renderer torn down before interop */ }
+        }
+        _selfRef?.Dispose();
     }
 }

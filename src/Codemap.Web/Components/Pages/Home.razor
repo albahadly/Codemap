@@ -476,11 +476,11 @@
             case ShortcutActionKind.ZoomFit when _canvas is not null:
                 await _canvas.ZoomToFitAsync();
                 break;
-            case ShortcutActionKind.ZoomIn:
-                _canvas?.ZoomIn();
+            case ShortcutActionKind.ZoomIn when _canvas is not null:
+                await _canvas.ZoomInAsync();
                 break;
-            case ShortcutActionKind.ZoomOut:
-                _canvas?.ZoomOut();
+            case ShortcutActionKind.ZoomOut when _canvas is not null:
+                await _canvas.ZoomOutAsync();
                 break;
             case ShortcutActionKind.Escape:
                 if (_showQuickJump || _showShortcuts || _showHistory || _showWarnings)
@@ -493,17 +493,17 @@
                     _nodeDetail = null;
                 }
                 break;
-            case ShortcutActionKind.NudgeLeft:
-                _canvas?.NudgeSelected(-action.Magnitude, 0);
+            case ShortcutActionKind.NudgeLeft when _canvas is not null:
+                await _canvas.NudgeSelectedAsync(-action.Magnitude, 0);
                 break;
-            case ShortcutActionKind.NudgeRight:
-                _canvas?.NudgeSelected(action.Magnitude, 0);
+            case ShortcutActionKind.NudgeRight when _canvas is not null:
+                await _canvas.NudgeSelectedAsync(action.Magnitude, 0);
                 break;
-            case ShortcutActionKind.NudgeUp:
-                _canvas?.NudgeSelected(0, -action.Magnitude);
+            case ShortcutActionKind.NudgeUp when _canvas is not null:
+                await _canvas.NudgeSelectedAsync(0, -action.Magnitude);
                 break;
-            case ShortcutActionKind.NudgeDown:
-                _canvas?.NudgeSelected(0, action.Magnitude);
+            case ShortcutActionKind.NudgeDown when _canvas is not null:
+                await _canvas.NudgeSelectedAsync(0, action.Magnitude);
                 break;
             case ShortcutActionKind.RemoveAnnotation when _selectedNodeId is not null:
                 _annotations.Remove(_selectedNodeId);
