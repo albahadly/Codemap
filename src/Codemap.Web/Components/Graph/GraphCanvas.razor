@@ -7,19 +7,32 @@
         <button class="@(Filter == LanguageFilter.CSharp ? "active" : null)" @onclick="() => SetFilter(LanguageFilter.CSharp)">C#</button>
         <button class="@(Filter == LanguageFilter.Js ? "active" : null)" @onclick="() => SetFilter(LanguageFilter.Js)">JS</button>
     </div>
+    @if (Graph is not null && Filter != LanguageFilter.All)
+    {
+        <div class="filter-count">showing @VisibleNodes().Count() of @Graph.Nodes.Count types</div>
+    }
 
     <div class="canvas-toolbar">
-        <button title="Zoom in (+)" @onclick="ZoomIn">+</button>
-        <button title="Zoom out (-)" @onclick="ZoomOut">−</button>
-        <button title="Zoom to fit (F)" @onclick="ZoomToFitAsync">⤢</button>
-        <button title="Arrange nodes (auto layout)" @onclick="ArrangeAsync">⊞</button>
+        <button aria-label="Zoom in" title="Zoom in (+)" @onclick="ZoomIn">+</button>
+        <button aria-label="Zoom out" title="Zoom out (-)" @onclick="ZoomOut">−</button>
+        <button aria-label="Zoom to fit" title="Zoom to fit (F)" @onclick="ZoomToFitAsync">⤢</button>
+        <button aria-label="Arrange nodes" title="Arrange nodes (auto layout)" @onclick="ArrangeAsync">⊞</button>
     </div>
 
     @if (Graph is null || Graph.Nodes.Count == 0)
     {
         <div class="canvas-empty">
-            <div class="big">No graph loaded</div>
-            <div>Enter a repository path above and press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to analyze.</div>
+            <div class="big">Scan a repository to see its structure</div>
+            <ol class="quick-start">
+                <li><span class="step">1</span> Paste a path to a solution or project folder in the box above</li>
+                <li><span class="step">2</span> Press <b>Analyze</b> (or <kbd>Ctrl</kbd>+<kbd>Enter</kbd>) and watch the progress bar</li>
+                <li><span class="step">3</span> Click any node to inspect it — linked nodes light up automatically</li>
+            </ol>
+            <div class="empty-hints">
+                <span><kbd>Ctrl</kbd>+<kbd>K</kbd> find a type</span>
+                <span><kbd>F</kbd> fit to view</span>
+                <span><kbd>?</kbd> all shortcuts</span>
+            </div>
         </div>
     }
 
@@ -72,6 +85,7 @@
                    @key="node.Id"
                    @onpointerdown="e => OnNodePointerDown(node.Id, e)"
                    @onpointerdown:stopPropagation="true">
+                    <title>@node.DisplayName — @node.Kind (@LangBadge(node.Language))&#10;@(string.IsNullOrEmpty(node.Namespace) ? "(global)" : node.Namespace)&#10;@node.SourceFile</title>
                     <rect class="box" width="@Inv(NodeWidth)" height="@Inv(NodeHeight)" rx="10" />
                     <rect class="accent @KindCss(node.Kind)" width="3.5" height="@Inv(NodeHeight)" rx="1.5" />
                     <text class="name" x="13" y="21">@Truncate(node.DisplayName, 21)</text>

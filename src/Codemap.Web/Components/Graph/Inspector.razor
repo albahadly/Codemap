@@ -47,6 +47,10 @@
 
         <div class="insp-section">
             <h4>Depends on (@Detail.DependsOn.Count)</h4>
+            @if (Detail.DependsOn.Count == 0)
+            {
+                <div class="insp-ns">Nothing — this type has no outgoing links.</div>
+            }
             @foreach (var relation in Detail.DependsOn)
             {
                 <div class="relation-row" @onclick="() => RelationClicked.InvokeAsync(relation.Edge.ToId)">
@@ -62,6 +66,10 @@
 
         <div class="insp-section">
             <h4>Depended on by (@Detail.DependedOnBy.Count)</h4>
+            @if (Detail.DependedOnBy.Count == 0)
+            {
+                <div class="insp-ns">Nothing depends on this type — a candidate for dead code.</div>
+            }
             @foreach (var relation in Detail.DependedOnBy)
             {
                 <div class="relation-row" @onclick="() => RelationClicked.InvokeAsync(relation.Edge.FromId)">

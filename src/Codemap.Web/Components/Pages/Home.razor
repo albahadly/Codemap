@@ -16,7 +16,13 @@
     <header class="topbar">
         <div class="logo">Code<span>map</span><span class="app-version" title="Codemap version">v@(AppVersion)</span></div>
         <input class="path-input" placeholder="Path to a repository, solution or project folder…"
-               @bind="_path" @bind:event="oninput" />
+               list="recent-scan-paths" @bind="_path" @bind:event="oninput" />
+        <datalist id="recent-scan-paths">
+            @foreach (var recentPath in _recentPaths)
+            {
+                <option value="@recentPath" />
+            }
+        </datalist>
         <select class="lang-hint" @bind="_languageHint" title="Language hint">
             <option value="">Auto</option>
             <option value="cs">C# only</option>
@@ -36,13 +42,20 @@
             <span class="file">@_statusFile</span>
         </div>
         <span style="flex:1"></span>
-        <button class="btn subtle icon-btn" title="Switch to @(_theme == "light" ? "dark" : "light") mode" @onclick="ToggleThemeAsync">
+        <button class="btn subtle icon-btn" aria-label="Toggle light/dark theme"
+                title="Switch to @(_theme == "light" ? "dark" : "light") mode" @onclick="ToggleThemeAsync">
             <SideIcon Name="@(_theme == "light" ? "moon" : "sun")" />
         </button>
         <button class="btn subtle" title="Quick jump (Ctrl+K)" @onclick="() => _showQuickJump = true">⌕ Search</button>
-        <button class="btn subtle" title="Shortcuts (?)" @onclick="() => _showShortcuts = true">?</button>
+        <button class="btn subtle" aria-label="Keyboard shortcuts" title="Shortcuts (?)" @onclick="() => _showShortcuts = true">?</button>
         <button class="btn" @onclick="OpenHistoryAsync">History</button>
         <button class="btn" disabled="@(_graph is null)" @onclick="PublishAsync">Publish snapshot</button>
+        @if (_scanning)
+        {
+            <div class="scan-progressbar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="@_scanPercent">
+                <div style="width:@(_scanPercent)%"></div>
+            </div>
+        }
     </header>
 
     <div class="app-main">
@@ -87,6 +100,13 @@
     </div>
 }
 
+<div class="toast-stack" aria-live="polite">
+    @foreach (var toast in _toasts)
+    {
+        <div class="toast @toast.Kind">@toast.Message</div>
+    }
+</div>
+
 <QuickJumpModal Visible="_showQuickJump"
                 Nodes="@(_graph?.Nodes ?? [])"
                 Closed="() => _showQuickJump = false"
@@ -127,6 +147,24 @@
     private string _statusDot = "";
     private string _statusText = "Idle";
     private string _statusFile = string.Empty;
+    private int _scanPercent;
+    private List<string> _recentPaths = [];
+
+    private sealed record ToastMessage(Guid Id, string Message, string Kind);
+    private readonly List<ToastMessage> _toasts = [];
+
+    /// Transient feedback for actions whose outcome would otherwise hide in the small status text.
+    private void ShowToast(string message, string kind = "ok")
+    {
+        var toast = new ToastMessage(Guid.NewGuid(), message, kind);
+        _toasts.Add(toast);
+        _ = InvokeAsync(async () =>
+        {
+            await Task.Delay(4000);
+            _toasts.Remove(toast);
+            StateHasChanged();
+        });
+    }
 
     private TopologyGraph? _graph;
     private Guid? _activeGraphId;
@@ -178,6 +216,7 @@
         _hub.On<string, int, string>("scanProgress", (project, percent, file) => InvokeAsync(() =>
         {
             if (!_scanning) return;
+            _scanPercent = percent;
             _statusText = $"{project} — {percent}%";
             _statusFile = file;
             StateHasChanged();
@@ -199,6 +238,7 @@
         if (_scanning || string.IsNullOrWhiteSpace(_path)) return;
 
         _scanning = true;
+        _scanPercent = 0;
         _statusDot = "running";
         _statusText = "Starting…";
         _statusFile = string.Empty;
@@ -220,6 +260,9 @@
             _statusDot = "done";
             _statusText = $"{result.Graph.ProjectName}: {result.Graph.Nodes.Count} types";
             _statusFile = string.Empty;
+            ShowToast($"Scanned {result.Graph.ProjectName}: {result.Graph.Nodes.Count} types, {result.Graph.Edges.Count} edges"
+                      + (result.Warnings.Count > 0 ? $" — {result.Warnings.Count} warnings" : ""),
+                result.Warnings.Count > 0 ? "warn" : "ok");
             await RefreshProjectListAsync();
         }
         catch (OperationCanceledException)
@@ -227,6 +270,7 @@
             _statusDot = "";
             _statusText = "Scan canceled";
             _statusFile = string.Empty;
+            ShowToast("Scan canceled", "warn");
         }
         catch (Exception ex)
         {
@@ -234,6 +278,7 @@
             _statusDot = "failed";
             _statusText = "Scan failed";
             _statusFile = ex.Message;
+            ShowToast($"Scan failed: {ex.Message}", "err");
         }
         finally
         {
@@ -280,6 +325,9 @@
             var loaded = await Dispatcher.Send(new GetLoadedGraphsQuery());
             var snapshots = await Dispatcher.Send(new GetSnapshotsQuery());
             _snapshots = snapshots;
+
+            var runs = await Dispatcher.Send(new GetScanRunsQuery(20));
+            _recentPaths = runs.Select(r => r.Path).Distinct(StringComparer.OrdinalIgnoreCase).Take(8).ToList();
 
             var seen = new HashSet<Guid>();
             var items = new List<Sidebar.ProjectListItem>();
@@ -361,6 +409,7 @@
         {
             await Dispatcher.Send(new PublishSnapshotCommand(graphId));
             _statusText = "Snapshot published";
+            ShowToast("Snapshot published — find it under History");
             await RefreshProjectListAsync();
         }
         catch (Exception ex)
@@ -369,6 +418,7 @@
             _statusDot = "failed";
             _statusText = "Publish failed";
             _statusFile = ex.Message;
+            ShowToast($"Publish failed: {ex.Message}", "err");
         }
     }
 
